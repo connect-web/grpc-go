@@ -1,59 +1,126 @@
-/*
- *
- * Copyright 2015 gRPC authors.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- */
-
-// Package main implements a server for Greeter service.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	pb "google.golang.org/grpc/examples/helloworld/helloworld"
 )
 
+// Task struct to hold task data and status
+type Task struct {
+	UUID    string
+	Status  string
+	Message string
+}
+
+type RequestTask struct {
+	UUID    string
+	Status  string
+	Message string
+}
+
 var (
-	port = flag.Int("port", 50051, "The server port")
+	taskQueue = make(map[string]*Task) // In-memory queue of tasks
+	mu        sync.Mutex               // Mutex to protect access to taskQueue
+
+	requestTaskQueue = make(map[string]*RequestTask) // In-memory queue of tasks
+
 )
 
-// server is used to implement helloworld.GreeterServer.
 type server struct {
 	pb.UnimplementedGreeterServer
 }
 
-// SayHello implements helloworld.GreeterServer
-func (s *server) SayHello(_ context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
-	log.Printf("Received: %v", in.GetName())
-	return &pb.HelloReply{Message: "Hello " + in.GetName()}, nil
+// SayHello creates a task, adds it to the queue, and returns a UUID
+func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
+	taskID := uuid.New().String()
+	log.Printf("Received task: %s", taskID)
+
+	// Simulate adding task to queue
+	mu.Lock()
+	taskQueue[taskID] = &Task{UUID: taskID, Status: "Pending", Message: "Task is pending"}
+	mu.Unlock()
+
+	// Asynchronously process the task in a separate goroutine
+	go processTask(taskID, in.GetName())
+
+	return &pb.HelloReply{Message: "Task started with UUID: " + taskID}, nil
+}
+
+// SayHelloAgain can also create a task (similarly) and return a UUID
+func (s *server) SayHelloAgain(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
+	taskID := uuid.New().String()
+	log.Printf("Received task: %s", taskID)
+
+	// Simulate adding task to queue
+	mu.Lock()
+	taskQueue[taskID] = &Task{UUID: taskID, Status: "Pending", Message: "Task is pending"}
+	mu.Unlock()
+
+	// Asynchronously process the task in a separate goroutine
+	go processTask(taskID, in.GetName())
+
+	return &pb.HelloReply{Message: "Task started", Uuid: taskID}, nil
+}
+
+// GetTaskStatus allows clients to query the status of a task
+func (s *server) GetTaskStatus(ctx context.Context, in *pb.TaskStatusRequest) (*pb.TaskStatusReply, error) {
+	mu.Lock()
+	task, exists := taskQueue[in.GetUuid()]
+	mu.Unlock()
+
+	if !exists {
+		log.Printf("Task with UUID %s not found", in.GetUuid())
+		return nil, fmt.Errorf("task not found")
+	}
+
+	log.Printf("Task %s found with status: %s", in.GetUuid(), task.Status)
+
+	return &pb.TaskStatusReply{
+		Uuid:    task.UUID,
+		Status:  task.Status,
+		Message: task.Message,
+	}, nil
+}
+
+// Simulate task processing
+func processTask(taskID, name string) {
+	mu.Lock()
+	taskQueue[taskID].Status = "In Progress"
+	mu.Unlock()
+
+	// Simulate work (e.g., time-consuming task)
+	time.Sleep(5 * time.Second)
+
+	mu.Lock()
+	taskQueue[taskID].Status = "Completed"
+	taskQueue[taskID].Message = "Hello " + name + ", task completed!"
+	mu.Unlock()
+
+	log.Printf("Task %s completed", taskID)
 }
 
 func main() {
-	flag.Parse()
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	// Listen on a TCP port
+	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+
+	// Create a new gRPC server
 	s := grpc.NewServer()
+
+	// Register the Greeter service with the server
 	pb.RegisterGreeterServer(s, &server{})
-	log.Printf("server listening at %v", lis.Addr())
+
+	log.Println("Server listening on port 50051")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
